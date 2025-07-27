@@ -209,13 +209,13 @@ class Game {
             name: teamName, 
             members: [], 
             color: color,
-            adminId: playerId, // NEW: Set creator as admin
-            description: '', // NEW: Add description
-            joinPolicy: 'open', // NEW: 'open' or 'request'
-            requests: [] // NEW: Player IDs requesting to join
+            adminId: playerId,
+            description: '',
+            joinPolicy: 'open',
+            requests: []
         };
         this.logEvent(`Team '${teamName}' has been founded by ${playerId}!`);
-        this.joinTeam(playerId, newTeamId); // Creator automatically joins
+        this.joinTeam(playerId, newTeamId);
     }
 
     joinTeam(playerId, teamId, isForced = false) {
@@ -227,35 +227,44 @@ class Game {
             return;
         }
         
-        // NEW: Check join policy
         if (team.joinPolicy === 'request' && !isForced) {
             this.logEvent(`This team requires a request to join.`, client);
             return;
         }
 
-        // Leave current team if any
-        if (player.team && this.state.teams[player.team]) {
-            if (player.team === teamId) {
-                this.logEvent("You are already in this team.", client);
-                return;
-            }
-            const oldTeam = this.state.teams[player.team];
-            oldTeam.members = oldTeam.members.filter(id => id !== playerId);
-            if (oldTeam.members.length === 0) {
-                delete this.state.teams[player.team];
-                this.logEvent(`Team '${oldTeam.name}' has been disbanded.`);
-            } else if (oldTeam.adminId === playerId) {
-                // If admin leaves, pass admin role to the next member
-                oldTeam.adminId = oldTeam.members[0];
-                this.logEvent(`${oldTeam.adminId} is now the admin of team '${oldTeam.name}'.`);
-            }
+        if (player.team) {
+            this.leaveTeam(playerId, true); // Leave current team silently before joining new one
         }
 
-        // Join new team
         player.team = teamId;
         team.members.push(playerId);
         this.logEvent(`${playerId} has joined team '${team.name}'.`);
         this.updateWorldState();
+    }
+
+    leaveTeam(playerId, isSilent = false) {
+        const player = this.findPlayerById(playerId);
+        if (!player || !player.team) {
+            if (!isSilent) this.logEvent("You are not in a team.", this.getClientByPlayerId(playerId));
+            return;
+        }
+
+        const team = this.state.teams[player.team];
+        if (team) {
+            team.members = team.members.filter(id => id !== playerId);
+            if (!isSilent) this.logEvent(`${playerId} has left team '${team.name}'.`);
+
+            if (team.members.length === 0) {
+                delete this.state.teams[player.team];
+                this.logEvent(`Team '${team.name}' has been disbanded.`);
+            } else if (team.adminId === playerId) {
+                team.adminId = team.members[0]; // Assign new admin
+                this.logEvent(`${team.adminId} is now the admin of team '${team.name}'.`);
+            }
+        }
+
+        player.team = null;
+        if (!isSilent) this.updateWorldState();
     }
 
     updateTeamSettings(adminId, data) {
@@ -270,7 +279,7 @@ class Game {
             return;
         }
         
-        team.description = data.description.slice(0, 100); // Limit description length
+        team.description = data.description.slice(0, 100);
         team.joinPolicy = data.joinPolicy === 'request' ? 'request' : 'open';
         
         this.logEvent(`Team '${team.name}' settings have been updated.`, client);
@@ -307,16 +316,15 @@ class Game {
             return;
         }
         
-        // Remove the request
         team.requests = team.requests.filter(id => id !== requesterId);
         
         const requesterClient = this.getClientByPlayerId(requesterId);
         if (decision === 'accept') {
             this.logEvent(`Your request to join '${team.name}' was accepted.`, requesterClient);
-            this.joinTeam(requesterId, teamId, true); // Force join, bypassing policy check
+            this.joinTeam(requesterId, teamId, true);
         } else {
             this.logEvent(`Your request to join '${team.name}' was declined.`, requesterClient);
-            this.updateWorldState(); // Still need to update state to remove the request
+            this.updateWorldState();
         }
     }
 
@@ -786,6 +794,7 @@ wss.on('connection', ws => {
                 case 'unequip-item': game.unequipItem(ws.playerId, data.slot); break;
                 case 'create-team': game.createTeam(ws.playerId, data.teamName); break;
                 case 'join-team': game.joinTeam(ws.playerId, data.teamId); break;
+                case 'leave-team': game.leaveTeam(ws.playerId); break;
                 case 'update-team-settings': game.updateTeamSettings(ws.playerId, data); break;
                 case 'request-to-join': game.requestToJoin(ws.playerId, data.teamId); break;
                 case 'resolve-join-request': game.resolveJoinRequest(ws.playerId, data); break;
@@ -806,20 +815,7 @@ wss.on('connection', ws => {
             if (player) {
                 game.logEvent(`Player ${player.id} has left the game.`);
                 game.stopCombat(player);
-                // Remove player from their team
-                if (player.team && game.state.teams[player.team]) {
-                    const team = game.state.teams[player.team];
-                    team.members = team.members.filter(id => id !== player.id);
-                    // If team is now empty, disband it
-                    if (team.members.length === 0) {
-                        delete game.state.teams[player.team];
-                        game.logEvent(`Team '${team.name}' has been disbanded.`);
-                    } else if (team.adminId === player.id) {
-                        // If the admin leaves, make the next player the admin
-                        team.adminId = team.members[0];
-                        game.logEvent(`${team.adminId} is now the admin of team '${team.name}'.`);
-                    }
-                }
+                game.leaveTeam(ws.playerId, true); // Silently leave team on disconnect
             }
             game.state.players = game.state.players.filter(p => p.id !== ws.playerId);
             game.updateWorldState();
